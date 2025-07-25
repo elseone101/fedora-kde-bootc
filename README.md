@@ -1,4 +1,8 @@
-# KDE-BOOTC
+# NOTICE
+This fork was created in order to PR certain changes to upstream. The changes are in the other branch `upstream-improvements`.
+The branch you are viewing is abandoned, and incompletely modified.
+
+# (Name TBD)
 The motivation for this project is inspired by the increasing popularity of atomic distros as technology advances. The Fedora project is one of the leaders in bringing this concept to the public, with other projects following suit. This approach offers significant benefits in terms of stability and security.
 
 They apply updates as a single transaction, known as atomic upgrades, which means if an update doesn't work as expected, the system can instantly roll back to its last stable state, saving users from potential issues. The immutable nature of the filesystem components reduces the risk of system corruption and unauthorised modifications as the core system files are read-only, making them impossible to modify.
@@ -31,7 +35,15 @@ Although it is tailored to KDE Plasma, most of the concepts and methodologies al
 
 (`quay.io/fedora/fedora-bootc` is the "generic" base image without any DE, `quay.io/organization/fedora` is where all their images exist)
 
+## sysext-manager
+[sysext-manager](https://github.com/travier/sysexts-manager) is a powerful tool used in order to manage the installed sysexts.
+The sysexts it manages are from a curated collection [fedora-sysexts](https://extensions.fcos.fr/).
+
+The collection contains common non-essential software like libvirt, fd-find, erofs-utils, which you can add to your system easily, without using `rpm-ostree` or yet another container build.
+(Kindly refer the linked sites themselves for usage info)
+
 ## Repository structure
+(Will be refactored)
 I tried to organise the repository for easy reading and maintenance. Files are stored in functional and well-defined directories, making them easy to find and understand their purpose and where they will be placed in the container image. 
 
 Each file follows a specific naming convention. For instance a file `/usr/lib/credstore/home.create.admin` is named as `usr__lib__credstore__home.create.admin`
@@ -44,15 +56,20 @@ Each file follows a specific naming convention. For instance a file `/usr/lib/cr
 
 ## Explaining the Containerfile step by step
 ### Image base
-The `fedora-bootc` project is part of the Cloud Native Computing Foundation (CNCF) Sandbox projects and  generates reference "base images" of bootable containers designed for use with the bootc project. In this project, I'm using  `quay.io/fedora/fedora-bootc` as base image. `fedora-kinoite` is based off it with KDE included.
+The `fedora-bootc` project is part of the Cloud Native Computing Foundation (CNCF) Sandbox projects and  generates reference "base images" of bootable containers designed for use with the bootc project. `fedora-kinoite` is based off it with KDE included.
 ```
 FROM quay.io/fedora/fedora-kinoite
 ```
 ### Setup filesystem
 `/opt` is a directory where software is installed when it isn't cleanly organized as it should be in `/usr`. Writable files are linked to equivalents in `/var/opt`.
-In case `/opt` is linked to `/var/opt`, let us revert that.
+In order to keep `/opt` seamless with `/usr`, it is linked to `/usr/opt`
 ```
-RUN [ -d /opt ] || ( rm -f /opt; mkdir /opt )
+RUN <<EOOPT
+mkdir /usr/opt
+[ -d /opt ] && mv /opt/* /usr/opt
+rm -f /opt
+ln -sf usr/opt /opt
+EOOPT
 ```
 In some cases, for successful package installation the `/var/roothome` directory must exist. If this folder is missing, the container build may fail. It is advisable to create this directory before installing packages.
 ```
@@ -68,16 +85,7 @@ COPY --chmod=0644 ./system/usr__local__share__kde-bootc__packages-removed /usr/l
 COPY --chmod=0644 ./system/usr__local__share__kde-bootc__packages-added /usr/local/share/kde-bootc/packages-added
 RUN jq -r .packages[] /usr/share/rpm-ostree/treefile.json > /usr/local/share/kde-bootc/packages-fedora-bootc
 ```
-### Install repositories
-This section handles adding extra repositories needed before installing packages. 
 
-In this example, I'm adding Tailscale, which is commonly used by the community, but the same principle applies to any other source you may add to your repositories. 
-
-Adding repositories uses the `config-manager` verb, available as a DNF5 plugin. This plugin is not pre-installed by default in *fedora-bootc*, so it will need to be installed beforehand.
-```
-RUN dnf -y install dnf5-plugins
-RUN dnf config-manager addrepo --from-repofile=https://pkgs.tailscale.com/stable/fedora/tailscale.repo
-```
 ### Install packages
 For clarity and task separation, I divided the installation into two steps.
 
@@ -104,6 +112,7 @@ The criteria used in this project is summarised below:
 - Remove packages that bring unwanted dependencies, such as DNF4 and GTK3.
 - Remove packages that handle deprecated services.
 - Remove packages that are resource-heavy, or bring unnecessary services.
+
 ### Configuration
 This section is designated for copying all necessary configuration files to `/usr` and `/etc`. As recommended by the *bootc project*, prioritise using `/usr` and use `/etc` as a fallback if needed.
 
@@ -127,95 +136,24 @@ The output must be added to `usr__lib__ostree__auth.json` file, which is copied 
 ```
 COPY --chmod=0600 ./system/usr__lib__ostree__auth.json /usr/lib/ostree/auth.json
 ```
-### Users
-This section is divided into two groups: one copies configuration files, and the other runs scripts to set up the system. 
 
-I opted for `systemd-homed` users because they are better suited than regular users for immutable desktops, preventing potential drift if `/etc/passwd` is modified locally. Additionally, each user home benefits from LUKS encrypted volume. However, the script includes an option to create regular users as a reference, which is currently commented out.
-
-The process begins when `firstboot-setup` runs, triggered by `firstboot-setup.service` during boot. It executes `homectl firstboot`, which checks if any regular home areas exist. If none are found, it searches for service credentials starting with `home.create.` to create users at boot. 
-
-You can't create systemd-homed users in the container build, because systemd must be running.
-
-Service credentials are imported into the systemd service using the following parameter:
-```
-firstboot-setup.service
-  ...
-  ImportCredential=home.create.*
-```
-For more details, refer to `homectl` and `systemd.exec` manual pages.
-
-The homed identity file (`usr__lib__credstore__home.create.admin`) sets the user's parameters, including username, real name, storage type, etc. This file can be modified to customise your user(s). 
-
-This example sets up a homed area using LUKS storage and a BTRF filesystem. I noticed that for LUKS storage, at least two parameters must be defined: `diskSize` and `rebalanceWeight`. If either is missing, `systemd-homed` will add a `perMachine` section defining these parameters, which will take precedence over the top-level user record (you may have set) because `perMachine` section supersedes them.
-
-**Most common parameters to adjust:**
-- `userName`: A single word for your username and home directory. In this example, it is `admin`. 
-- `realName`: Full Name
-- `diskSize`: The size of the LUKS storage volume, calculated in bytes. For instance, 1 GB equals 1024x1024x1024 bytes, which is 1073741824 bytes. This example sets up a 10GB storage volume. 
-- `rebalanceWeight`: Relevant only when multiple user accounts share the available storage. If `diskSize` is defined, this parameter can be set to `false`. 
-- `uid/gid`: User and Group ID. The default range for regular users is 1000-6000, and for `systemd-homed` users, it is 60001-60513. However, you can assign uid/gid for `systemd-homed` users from both ranges; in this example, they are set to `1000`.
-- `memberOf`: The groups the user belongs to. As a power user, it should be part of the `wheel` group. 
-- `hashedPassword`: This is the hashed version of the password stored under secret. Setting up an initial password allows `homectl firstboot` to create the user without prompting. This password should be changed afterwards (`homectl passwd admin`). This hash can be created using `mkpasswd` utility. 
-
-The identity file is stored in one of the directories where `systemd-homed` expects to find credentials.
-```
-COPY --chmod=0644 ./system/usr__lib__credstore__home.create.admin /usr/lib/credstore/home.create.admin
-```
-For more information on user records, visit: https://systemd.io/USER_RECORD/
-
-Another key parameter to set up is the range for `/etc/subuid` and `/etc/subgid` for the `admin` user. This range is necessary for running rootless containers, as each uid inside the container will be mapped to a uid outside the container within this range. When using `systemd-homed`, note that the available uid/gid ranges are predefined by systemd, and some ranges may be unavailable. Therefore, the chosen range in these files must adhere to these limitations.
-
-When running `findmnt` or `mount` command, the mount option `idmapped` will show for `/var/home/admin`, indicating that it was pre-mapped by systemd. 
-
-The available range is 524288…1879048191. In this example, I chose 1000001 to easily identify the service running in the container. For instance, if the container is running Apache with uid=48, the volume or folder bound to it will have uid=1000048.
-
-For more information on available ranges, visit: https://systemd.io/UIDS-GIDS/
-
-The `config-users` script sets this up and also creates a temporary password for the root user. As I will explain later, having a root user as an alternative login is important.
-
-The next script will set up `authselect` to enable authenticating the `admin` user on the login page. To achieve this, we need to enable the features `with-systemd-homed` and `with-fingerprint` (if your computer has a fingerprint reader) for the local profile.
-```
-COPY --chmod=0755 ./scripts/* /tmp/scripts/
-RUN /tmp/scripts/config-users
-RUN /tmp/scripts/config-authselect && rm -r /tmp/scripts
-```
 ### Systemd services
-The first service completes the configuration during machine boot. These tasks can't be done while building the container as they require systemd to be running.
-
-It sets the hostname:
+This service automates updates, replacing the default `bootc-fetch-apply-updates` service, which would download and apply updates as soon as they are available. This approach is problematic because it causes your computer to shut down without warning, so it is better to disable by masking it: 
 ```
-HOST_NAME=kde-bootc
-hostnamectl hostname $HOST_NAME
+RUN systemctl mask bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service
 ```
-It creates the `systemd-homed` user `admin`:
-```
-homectl firstboot
-```
-And it sets up the firewall to allow kdeconnect to communicate:
-```
-firewall-cmd –set-default-zone=public
-firewall-cmd --add-service=kdeconnect –permanent
-```
-The systemd unit will be placed, and enabled by default:
-```
-COPY --chmod=0644 ./systemd/usr__lib__systemd__system__firstboot-setup.service /usr/lib/systemd/system/firstboot-setup.service
-RUN systemctl enable firstboot-setup.service
-```
-The second service automates updates, replacing the default `bootc-fetch-apply-updates` service, which would download and apply updates as soon as they are available. This approach is problematic because it causes your computer to shut down without warning, so it is better to disable by masking the timer: 
-```
-RUN systemctl mask bootc-fetch-apply-updates.timer
-```
-The replacement `bootc-fetch` service will download the image from the registry and queue it for the next reboot. It is not enabled by default and can be turned on or off by the user as needed.
+The replacement `bootc-fetch` service will download the image from the registry and queue it for the next reboot. It is enabled by default and can be turned on or off by the user as needed.
 ```
 COPY --chmod=0644 ./systemd/usr__lib__systemd__system__bootc-fetch.service /usr/lib/systemd/system/bootc-fetch.service
 COPY --chmod=0644 ./systemd/usr__lib__systemd__system__bootc-fetch.timer /usr/lib/systemd/system/bootc-fetch.timer
+RUN systemctl enable bootc-fetch.timer
 ```
-The systemd service in charge to update the bootloader is enabled by default. It will be triggered at boot.
+This systemd service in charge to update the bootloader is enabled by default. It will be triggered at boot.
 ```
 RUN systemctl enable bootloader-update.service
 ```
 ### Clean and Checks
-This section focuses on cleaning the container before converting it into an image. The strategy includes using the latest `bootc container lint` option.
+This section focuses on cleaning the container before converting it into an image.
 ```
 RUN find /var/log -type f ! -empty -delete
 RUN bootc container lint
@@ -232,12 +170,17 @@ Then, outside the repository on a different directory, create a folder named `ou
 ```
 [customizations.installer.kickstart]
 contents = "graphical"
+```
 
+<!-- This isn't needed for now...
+```
 [customizations.installer.modules]
 disable = [
   "org.fedoraproject.Anaconda.Modules.Users"
 ]
 ```
+-->
+<!-- So isn't this needed for now...
 If you prefer a non-interactive text installation, you may use the variation below:
 ```
 [customizations.installer.kickstart]
@@ -254,6 +197,7 @@ disable = [
 ```
 The latter will setup systemd default target to `multi-user.target`, so you will need to run `systemctl set-default graphical.target` to boot into a graphical environment.
 In both configurations, the user module is disabled. We do not need to set up a user during installation, as this is already being taken care of.
+-->
 
 Within the directory where `./output/` and `./config.toml` exists, run `bootc-image-builder` utility which is available as a container. It must be ran as root.
 ```
@@ -273,20 +217,6 @@ For more information on `bootc-image-builder`, visit: https://github.com/osbuild
 ## Post installation
 Once *kde-bootc* is installed, there are additional settings to improve usability. 
 
-The first step is to restore the SELinux context for the `systemd-homed` home directory. Without this, you may not be able to log in as `admin`. To complete this task, log in as `root`, activate `admin` home area, and then run `restorecon` to restore the SELinux context. 
-```
-homectl activate admin
-<< enter password for admin: Temp#SsaP
-restorecon -R /home/admin
-homectl deactivate admin
-```
-At this point, you can change the passwords for `root` and `admin`: 
-```
-passwd root
-homectl passwd admin
-```
-After completing these steps, you can log out from `root` and log in to `admin`. 
-
 If your computer has a fingerprint reader, setting it up is not possible from Plasma's user settings, as `systemd-homed` is not yet recognised by the desktop. However, you can manually enrol your fingerprint by running `fprintd-enroll` and placing your finger on the reader as you normally would. 
 ```
 sudo fprintd-enroll admin
@@ -295,11 +225,7 @@ Same as above, you cannot set up the avatar from Plasma's user settings, but you
 ```
 /usr/share/plasma/avatars/<avatar.png> -> /var/lib/AccountsService/icons/admin
 ```
-Finally, enable the service to keep your system updated, and any other you may need: 
-```
-systemctl enable --now bootc-fetch.timer
-systemctl enable --now tailscaled
-```
+
 To pull your image from a private GitHub repository using podman, copy `/usr/lib/ostree/auth.json` to `/home/admin/.config/containers/auth.json` for user space, and `/root/.config/containers/auth.json` for root. It will allow you to use `podman pull ..` and `sudo podman pull ..` respectively.
 ## Troubleshooting
 ### Drifts on `/etc`
